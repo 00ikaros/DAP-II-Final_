@@ -1,0 +1,749 @@
+---
+title: "30538 Final Project: "
+author: "Zhuohao Yang & Yue Wang & Gabrielle Pan" 
+date: "2024/12/01"
+format: pdf
+execute:
+  eval: false
+  echo: false
+---
+Group Member:
+Yue Wang, yuew3@uchicago.edu, Aaronnn0912
+Gabrielle Pan, gpan@uchicago.edu, ddbb421
+Zhuohao Yang, zhuohao@uchicago.edu, 00ikaros
+
+
+# 1.	Introduction
+This project investigates reviews from Las Vegas, aiming to understand the sentiment trends, thematic content, and geographic distribution of public opinion. The analysis combines natural language processing (NLP) techniques, sentiment analysis, and geospatial visualization to derive actionable insights.
+
+# 2.	Research Question
+How do public sentiments and thematic trends in reviews evolve over time, and what are their geographic patterns in Las Vegas? The analysis seeks to answer: What are the prevailing themes in reviews? How do sentiments fluctuate temporally? How are sentiments distributed geographically?
+
+
+```{python}
+#| eval: false
+#| echo: false
+# Please check out whether you have the following packages downloaded on your environment
+pip install umap-learn
+pip install bert
+pip install vegafusion
+pip install contextily
+```
+
+
+# Data Cleanning
+
+Structured information was extracted from review and location tag datasets using Python libraries, including:
+•	pandas: For data manipulation and structuring.
+•	re: For regular expression-based text extraction.
+Incomplete, non-English, and improperly formatted records were removed to ensure data quality. Non-standard formats in text and timestamps were standardized to create a clean dataset for further processing.
+
+
+## Import Dataset
+```{python}
+#| eval: false
+#| echo: false
+# please locate to the Comment_unique_Vegas_location.csv
+import pandas as pd
+file_path = "D:/uchicago/24 spring/deep learning/final project/Cleaned_review/Comment_unique_Vegas_location.csv"
+
+pattern = r'\[(.*?)\],\[(.*?)\]' # pattern
+
+
+placekeys = []
+reviews = []
+timestamps = []
+
+import re
+with open(file_path, 'r', encoding='utf-8') as file:
+    for line in file:
+        # Extract PLACEKEY and content
+        split_line = line.split(',', 2)  # Split only on the first two commas to preserve review data format
+        if len(split_line) < 3:
+            continue  # Skip lines that do not contain enough data
+
+        placekey = split_line[0]
+        content = split_line[2]
+
+        # Find all review and timestamp matches
+        matches = re.findall(pattern, content)
+        for match in matches:
+            placekeys.append(placekey)
+            reviews.append(match[0])
+            timestamps.append(pd.to_datetime(match[1], errors='coerce'))
+
+# Creating DataFrame
+data = pd.DataFrame({
+    'PLACEKEY': placekeys,
+    'Review': reviews,
+    'Timestamp': timestamps
+})
+
+print(data.head())
+
+```
+
+
+## Label Dataset Filtering
+
+```{python}
+#| eval: false
+#| echo: false
+# please locate to restricted_cols.csv
+file_path_2 = "D:/uchicago/24 spring/deep learning/final project/Total cities/Vegas_NY_SF_SD/park/restricted_cols.csv"
+label_data = pd.read_csv(file_path_2)
+
+# Extracting the park and business center columns
+label_data_filtered = label_data[['PLACEKEY', 'Park', 'Business_Center']].drop_duplicates()
+
+# Merge with original dataset
+merged_data = pd.merge(data, label_data_filtered, on='PLACEKEY', how='left')
+merged_data['Park'].fillna(0, inplace = True)
+merged_data['Business_Center'].fillna(0, inplace = True)
+
+# Filter out the park_review
+business_reviews = merged_data[merged_data['Business_Center'] == 1]
+
+# 创一个新的colunm去调整timestamp的格式
+business_reviews['Timestamp_park'] = business_reviews['Timestamp']
+
+# 储备一下column of timestamp
+##if park_reviews['Timestamp_park'].dtype == 'datetime64[ns]':
+    ##park_reviews['Timestamp_park'] = park_reviews['Timestamp_park'].apply(lambda x: x.toordinal())
+
+# Convert 'Timestamp_park' to ordinal
+# merged_data['Timestamp_park'] = merged_data['Timestamp_park'].apply(lambda x: x.toordinal())
+
+
+texts = business_reviews['Review'].tolist()
+timestamps = business_reviews['Timestamp_park'].tolist()
+
+```
+
+
+# Data Preprocessing
+
+Natural Language Processing (NLP) techniques were employed to preprocess the text:
+•	langdetect: Detected and filtered out non-English reviews.
+•	NLTK: Removed noise such as stopwords, tokenized the text, and standardized the format through lemmatization using WordNetLemmatizer.
+These steps ensured that the data was normalized and ready for sentiment analysis and topic modeling.
+
+
+## Stopwords
+```{python}
+#| eval: false
+#| echo: false
+import nltk
+from nltk.corpus import stopwords
+import string
+from hdbscan import HDBSCAN
+from umap import UMAP
+from langdetect import detect
+from nltk.stem import WordNetLemmatizer
+import logging
+
+# filterer out stop words + 过滤掉非英文的
+logging.basicConfig(level=logging.INFO)
+
+nltk.download('stopwords')
+nltk.download('stopwords')
+nltk.download('wordnet') #需要做lemmatization：预测这个词的下一个关联词
+nltk.download('omw-1.4')
+nltk.download('punkt')
+
+
+# initialize the lemmatizer
+lemmatizer = WordNetLemmatizer()
+
+# remove short reviews
+business_reviews = business_reviews[business_reviews['Review'].astype(str).str.split().str.len() >= 8]
+
+stop_words = set(stopwords.words('english'))
+
+def preprocess_text(text):
+    # Ensure the text is a string
+    if not isinstance(text, str):
+        return None
+
+    # Language detection
+    try:
+        if detect(text) != 'en':
+            return None
+    except Exception as e:
+        logging.warning(f"Language detection failed for text: {text[:30]}... Error: {e}")
+        return None
+
+    # Lowercase and remove punctuation/digits
+    text = text.lower()
+    text = ''.join([char for char in text if char not in string.punctuation and not char.isdigit()])
+
+    # Remove stopwords
+    text = ' '.join([word for word in text.split() if word not in stop_words])
+
+    # Remove extra whitespace
+    text = ' '.join(text.split())
+
+    # Lemmatization
+    try:
+        text = ' '.join([lemmatizer.lemmatize(word) for word in text.split()])
+    except Exception as e:
+        logging.warning(f"Lemmatization failed for text: {text[:30]}... Error: {e}")
+        return None
+
+    return text
+
+# Apply preprocessing
+business_reviews['Review'] = business_reviews['Review'].apply(preprocess_text)
+business_reviews = business_reviews.dropna(subset=['Review']) # 有na的话
+```
+
+```{python}
+#| eval: false
+#| echo: false
+# Reset index to ensure sequential indexing
+business_reviews = business_reviews.reset_index(drop=True)
+
+texts = business_reviews['Review'].tolist()
+timestamps = business_reviews['Timestamp'].tolist()
+
+# Verify lengths match
+print(f"Length of texts: {len(texts)}")
+print(f"Length of business_reviews: {len(business_reviews)}")
+```
+
+# Setup and Train the BERTopic Modeling
+
+The BERTopic model was applied to uncover key themes in the reviews:
+•	Embedding Model: all-mpnet-base-v2, a Transformer-based pre-trained model, was used to generate semantic embeddings for the reviews.
+•	Clustering: HDBSCAN was employed to group reviews into meaningful topics.
+•	Temporal Analysis: pandas was used to analyze how topic distributions changed over time.
+
+
+## Trainning
+```{python}
+#| eval: false
+#| echo: false
+from bertopic import BERTopic
+from sklearn.datasets import fetch_20newsgroups
+
+# HDBSCAN model
+hdbscan_model = HDBSCAN(
+    min_cluster_size=30,
+    min_samples=10,
+    metric='euclidean',
+    cluster_selection_method='eom',
+    prediction_data=True
+)
+
+# BERT train
+topic_model = BERTopic(embedding_model='all-mpnet-base-v2',
+                       hdbscan_model=hdbscan_model,
+                       calculate_probabilities=True,
+                       nr_topics = 11,
+                       verbose=True)
+
+# fit and transform
+topics, probabilites = topic_model.fit_transform(texts, y = timestamps)
+```
+
+## Topics
+```{python}
+#| eval: false
+#| echo: false
+for topic in topic_model.get_topic_freq().Topic:
+    print(f"Topic {topic}: {topic_model.get_topic(topic)}\n")
+```
+
+### Retrieve words for each topic
+
+```{python}
+#| eval: false
+#| echo: false
+# exclude the outlier topic -1
+unique_topics = sorted(set(topics) - {-1})
+
+# create a mapping
+topic_mapping = {old_topic: new_topic for new_topic, old_topic in enumerate(unique_topics, start=1)}
+
+business_reviews['Assigned_Topic'] = [topic_mapping.get(topic, -1) for topic in topics]
+business_reviews.to_csv("D:/uchicago/24 fall/data/final/DAP-II-Final-Presentation/processed_reviews.csv", index=False)
+```
+
+
+
+```{python}
+#| eval: false
+#| echo: false
+# Extract the topics
+topics_representation = {topic_mapping.get(topic): topic_model.get_topic(topic) for topic in unique_topics}
+
+# generate the dataframe to store the topics representations
+topics_df = pd.DataFrame(
+    [(topic, word, weight) for topic, words in topics_representation.items() for word, weight in words],
+    columns=['Topic', 'Word', 'Weight']
+)
+
+# save the file
+topics_representation_file_path = "D:/uchicago/24 fall/data/final/DAP-II-Final-Presentation/topic_rep.csv"
+topics_df.to_csv(topics_representation_file_path, index=False)
+```
+
+# Cluster Similarity Cosine 
+
+
+```{python}
+#| eval: false
+#| echo: false
+from bertopic._utils import select_backend
+
+# Get the embedding model used in BERTopic
+embedding_model = select_backend(topic_model.embedding_model, language='english')
+
+# Extract topic words
+topics = topic_model.get_topics()
+
+# Get the embeddings for each topic
+topic_embeddings = []
+for topic in topics:
+    if topic == -1:
+        continue  # Skip the outlier topic
+    words = [word for word, _ in topic_model.get_topic(topic)]
+    # Join words to create a topic description
+    topic_desc = ' '.join(words)
+    # Embed the topic description
+    embedding = embedding_model.embed([topic_desc])[0]
+    topic_embeddings.append((topic, embedding))
+```
+
+```{python}
+#| eval: false
+#| echo: false
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+import pandas as pd
+
+# Create a matrix of embeddings
+embeddings = np.array([emb for _, emb in topic_embeddings])
+
+# Compute cosine similarity matrix
+cosine_sim_matrix = cosine_similarity(embeddings)
+
+# Create a DataFrame for better visualization
+topic_numbers = [topic for topic, _ in topic_embeddings]
+cosine_sim_df = pd.DataFrame(cosine_sim_matrix, index=topic_numbers, columns=topic_numbers)
+
+# Display the similarity matrix
+print(cosine_sim_df)
+
+```
+
+![cosine similarity](pictures/cosine_similarity.png)
+
+This heatmap shows the cosine similarity between topics from the BERTopic model, with values closer to 1 indicating stronger thematic overlap. For instance, Topic 0 and Topic 1 (similarity 0.81) suggest shared themes, while lower scores (e.g., Topic 4 and Topic 7 at 0.57) indicate distinct topics. This analysis supports content categorization by grouping similar topics, uncovers thematic connections like shared emotional patterns between Topic 5 and Topic 0, and informs business strategies, such as aligning marketing for related topics like dining (Topic 2) and professional services (Topic 1).
+
+
+# Sentiment Analysis
+
+The VADER sentiment analysis tool quantified user emotions in the reviews:
+•	Sentiment scores ranging from -1 (negative) to 1 (positive) were assigned to each review.
+•	These scores were used to identify temporal trends in sentiment, providing insights into users’ emotional responses over time.
+
+
+
+## Assign the Sentiment Score
+```{python}
+#| eval: false
+#| echo: false
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
+nltk.download('vader_lexicon')
+
+sid = SentimentIntensityAnalyzer()
+```
+
+* Since the performance of TextBlob was too bad, therefore, we chose VADER as hour sentiment analysis library.
+
+
+```{python}
+#| eval: false
+#| echo: false
+# remove the empty strings
+business_reviews = business_reviews[business_reviews['Review'].notnull()]
+business_reviews = business_reviews[business_reviews['Review'].str.strip() != '']
+
+# apply sentiment analysis
+business_reviews['Sentiment'] = business_reviews['Review'].apply(lambda x: sid.polarity_scores(x)['compound'])
+```
+
+### Data Visualization
+
+Altair: Created daily and monthly sentiment trend charts to visualize temporal variations in user emotions.
+GeoPandas & Matplotlib: Mapped the spatial distribution of sentiment, highlighting areas with positive and negative user feedback.
+Polynomial Regression: Modeled the nonlinear temporal trends in topic probabilities, enabling long-term pattern predictions.
+
+
+```{python}
+#| eval: false
+#| echo: false
+import altair as alt
+import datetime as datetime
+
+#
+business_reviews['Timestamp'] = pd.to_datetime(business_reviews['Timestamp'], errors='coerce')
+business_reviews['Date'] = business_reviews['Timestamp'].dt.strftime('%Y-%m-%d')
+business_reviews['YearMonth'] = business_reviews['Timestamp'].dt.to_period('M').dt.to_timestamp()
+
+# Handle potential missing 'Sentiment' values by ensuring it's numeric
+business_reviews['Sentiment'] = pd.to_numeric(business_reviews['Sentiment'], errors='coerce')
+
+# dropna
+business_reviews = business_reviews.dropna(subset=['Sentiment', 'Timestamp'])
+
+#
+daily_sentiment = business_reviews.groupby('Date')['Sentiment'].mean().reset_index()
+monthly_sentiment = business_reviews.groupby('YearMonth')['Sentiment'].mean().reset_index()
+
+# create altair plots
+## daily
+daily_chart = alt.Chart(daily_sentiment).mark_circle().encode(
+    alt.X('Date:T', title = "Date"),
+    alt.Y('Sentiment:Q', title = 'Sentiment'),
+    tooltip = ['Date:T', 'Sentiment:Q']
+).properties(
+    title = 'Average Daily Sentiment in Las Vegas',
+    width = 800,
+    height = 400
+)
+
+## monthly
+monthly_chart = alt.Chart(monthly_sentiment).mark_circle().encode(
+    alt.X('YearMonth:T', title="Year-Month"),
+    alt.Y('Sentiment:Q', title='Sentiment'),
+    tooltip=['YearMonth:T', 'Sentiment:Q']
+).properties(
+    title='Average Monthly Sentiment in Las Vegas',
+    width=800,
+    height=400
+)
+```
+
+```{python}
+#| eval: false
+#| echo: false
+# daily plot
+daily_chart.show()
+
+# montly plot
+monthly_chart.show()
+```
+
+![Monthly Chart](pictures/monthly.png)
+
+## Combine with the Topics Probabilities
+
+
+```{python}
+#| eval: false
+#| echo: false
+# locate topic probabilities
+topic_probs = topic_model.transform(texts)[1]
+
+# create a DataFrame with probabilities and sentiment
+prob_df = pd.DataFrame(topic_probs, columns=[f'Topic_{i}' for i in range(topic_probs.shape[1])])
+prob_df['Sentiment'] = business_reviews['Sentiment'].reset_index(drop=True)
+```
+
+
+
+```{python}
+#| eval: false
+#| echo: false
+## save the other datasets
+prob_df.to_csv("D:/uchicago/24 fall/data/final/DAP-II-Final-Presentation/prob_sentiment.csv", index = False)
+
+daily_sentiment.to_csv("D:/uchicago/24 fall/data/final/DAP-II-Final-Presentation/daily_sentiment.csv", index = False)
+
+monthly_sentiment.to_csv("D:/uchicago/24 fall/data/final/DAP-II-Final-Presentation/monthly_sentiment.csv", index = False)
+```
+
+```{python}
+#| eval: false
+#| echo: false
+print("Daily Sentiment Columns:", daily_sentiment.columns)
+print("First few rows of daily_sentiment:")
+print(daily_sentiment.head())
+
+print("Monthly Sentiment Columns:", monthly_sentiment.columns)
+print("First few rows of monthly_sentiment:")
+print(monthly_sentiment.head())
+```
+
+
+# Polynomial Multi-Regression
+
+## Prepare Topic Probabilities Data
+
+```{python}
+#| eval: false
+#| echo: false
+# get the probabilities from topics
+topics, probabilities = topic_model.transform(merged_data['Review'].tolist())
+
+# settup a dataframe to store the probabilities
+prob_df = pd.DataFrame(probabilities, columns = [f'Topic_{i}' for i in range(probabilities.shape[1])])
+
+# timestamp
+prob_df['Timestamp'] = merged_data['Timestamp'].reset_index(drop = True)
+
+
+# convert the timestamp to numeric format
+prob_df['Timestamp_ordinal'] = prob_df['Timestamp'].apply(lambda x: x.toordinal())
+```
+
+## Perform Polynominal Regression for Each Topic
+```{python}
+#| eval: false
+#| echo: false
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import train_test_split
+import numpy
+
+# Choose the degree
+degree = 3
+
+# Initialize dictionaries to store models and predictions
+models = {}
+predictions = {}
+
+# loop through each topic
+for topic in [col for col in prob_df.columns if 'Topic_' in col]:
+    X = prob_df[['Timestamp_ordinal']]
+    y = prob_df[topic]
+
+    # check for missing values
+    if X.isnull().any().any() or y.isnull().any():
+        print(f"Missing values found in {topic}. Skipping this topic.")
+        continue
+
+    # create polynomial features
+    poly = PolynomialFeatures(degree=degree)
+    X_poly = poly.fit_transform(X)
+
+    # fit the regression model
+    model = LinearRegression()
+    model.fit(X_poly, y)
+
+    # store the model in the 'models' dictionary
+    models[topic] = model
+
+    # predict values
+    y_pred = model.predict(X_poly)
+    predictions[topic] = y_pred
+
+    # add predictions to dataframe for plotting
+    prob_df[f'{topic}_pred'] = y_pred
+
+    print(f"Completed polynomial regression for {topic}.")
+
+#
+print(prob_df.head())
+```
+
+
+## Visualize Topic Probability Trends
+
+```{python}
+#| eval: false
+#| echo: false
+# since the dataset is large
+alt.data_transformers.enable('default', max_rows=1000000)
+```
+
+```{python}
+#| eval: false
+#| echo: false
+# Select a topic to visualize
+topic_to_plot = 'Topic_3'
+
+# Prepare data for plotting
+plot_data = prob_df[['Timestamp', topic_to_plot, f'{topic_to_plot}_pred']].copy()
+plot_data = plot_data.sort_values('Timestamp')
+
+# Melt the DataFrame for Altair
+plot_data_melted = plot_data.melt('Timestamp', var_name='Series', value_name='Probability')
+
+# Create the plot
+topic_chart = alt.Chart(plot_data_melted).mark_circle().encode(
+    alt.X('Timestamp:T', title='Timestamp'),
+    alt.Y('Probability:Q', title='Probabilities'),
+    color='Series:N'
+).properties(
+    title=f'Trend of {topic_to_plot} Probability Over Time',
+    width=800,
+    height=400
+)
+
+topic_chart
+```
+
+![topic_3 Probabilities Over Time](pictures/topic_3.png)
+
+The plots display the daily average sentiment over time and monthly, showing significant variability with a wide range of sentiment scores. This broader spread reflects the influence of specific events or daily visitor experiences, causing fluctuations in sentiment. Despite the variability, most scores cluster around positive sentiment, suggesting that, overall, visitor experiences tended to lean positive even on days with notable fluctuations.
+
+```{python}
+#| eval: false
+#| echo: false
+# prepare the data
+prob_df['Sentiment'] = merged_data['Sentiment'].reset_index(drop=True)
+X = prob_df.drop(['Sentiment', 'Timestamp', 'Timestamp_ordinal'], axis=1)
+y = prob_df['Sentiment']
+
+# setting the polynomial features
+poly = PolynomialFeatures(degree = 2, include_bias = False)
+X_poly = poly.fit_transform(X)
+
+# train-test split
+X_train, X_test, y_train, y_test = train_test_split(X_poly, y, test_size=0.2, random_state=42)
+
+# regression model
+model = LinearRegression()
+model.fit(X_train, y_train)
+
+# model evaluation
+score = model.score(X_test, y_test)
+print(f'R^2 Score: {score:.4f}')
+```
+
+
+
+# Lon & Lat Geopandas
+
+## Prepare Data with Lat/Lon Coordinates
+```{python}
+#| eval: false
+#| echo: false
+# The third dataset, please locate to merged_Data_Vegas.csv
+file_path_3 = "D:/uchicago/24 spring/deep learning/final project/Total cities/Vegas/merged_Data_Vegas.csv"
+updated_google_review = pd.read_csv(file_path_3, low_memory=False)
+
+# merge the latitude and longtitude into merged_data
+merged_data_sec = pd.merge(
+    merged_data, 
+    updated_google_review[['PLACEKEY', 'LATITUDE', 'LONGITUDE']], 
+    on='PLACEKEY', 
+    how='left'
+)
+
+# drop rows without location data
+merged_data_sec = merged_data_sec.dropna(subset=['LATITUDE', 'LONGITUDE'])
+
+# create
+geometry = [Point(xy) for xy in zip(merged_data_sec['LONGITUDE'], merged_data_sec['LATITUDE'])]
+geo_df = gpd.GeoDataFrame(merged_data_sec, geometry=geometry)
+
+if geo_df.crs is None:
+    geo_df.set_crs(epsg=4326, inplace=True)
+
+print("Original CRS of geo_df:", geo_df.crs)
+```
+
+```{python}
+#| eval: false
+#| echo: false
+# Reproject to Web Mercator (EPSG:3857) for Contextily
+geo_df = geo_df.to_crs(epsg=3857)
+
+print("Reprojected CRS of geo_df:", geo_df.crs)
+```
+
+## Visualize Sentiment Scores on a Map with Folium
+
+```{python}
+#| eval: false
+#| echo: false
+import geopandas as gpd
+from shapely.geometry import Point
+import matplotlib.pyplot as plt
+import contextily as ctx
+
+## las vegas shape, please locate to City_Council_Wards.shp
+shape_file = "D:/uchicago/24 fall/data/final/City_Council_Wards/City_Council_Wards.shp"
+las_vegas_boundary = gpd.read_file(shape_file)
+
+# Since we have not settled the crs
+if las_vegas_boundary.crs != 'EPSG:3857':
+    las_vegas_boundary = las_vegas_boundary.to_crs(epsg=3857)
+
+# plotting
+fig, ax = plt.subplots(figsize=(36, 26))
+
+las_vegas_boundary.plot(
+    ax=ax,
+    edgecolor='black',
+    facecolor='none',
+    linewidth=2,
+    label='Las Vegas Boundary'
+)
+
+geo_df.plot(
+    ax=ax,
+    column='Sentiment',
+    cmap='RdYlGn',
+    markersize=50,
+    legend=True,
+    legend_kwds={'label': "Sentiment Score"},
+    alpha=0.7
+)
+
+xmin, ymin, xmax, ymax = las_vegas_boundary.total_bounds
+ax.set_xlim(xmin, xmax)
+ax.set_ylim(ymin, ymax)
+
+ctx.add_basemap(
+    ax,
+    source=ctx.providers.Stamen.TonerLite,
+    zoom=11
+)
+
+# remove title
+ax.set_title('Sentiment Scores in Las Vegas', fontsize=15)
+ax.set_axis_off()
+
+# add legend
+plt.legend()
+
+plt.show()
+```
+
+![Geo](pictures/geo.png)
+
+This map visualizes the spatial distribution of sentiment scores across different areas of Las Vegas. Areas with higher densities of points likely correspond to hubs of activity, such as popular business centers or recreational zones. Green points represent positive sentiment, while red points indicate negative sentiment.
+Notably, clusters of red points are observed in certain high-density areas, suggesting potential issues such as noise or overcrowding that might negatively impact visitor experiences in these regions. These findings highlight the importance of addressing localized challenges in high-traffic areas to improve overall user satisfaction. The map underscores the need for spatially targeted interventions to balance activity levels and enhance sentiment in less positively perceived areas.
+
+
+4.	Difficulties Encountered
+VADER's Limitations:
+•	VADER struggled with complex reviews, such as those containing sarcasm or implicit sentiment. For example, reviews like “Not bad at all” could be misclassified, reducing the accuracy of sentiment scores.
+Geographical Data Issues:
+•	Some reviews lacked latitude and longitude data, limiting the scope of geospatial analysis.
+•	Inconsistent coordinate systems between datasets required extra cleaning and standardization, reducing the coverage of spatial sentiment maps.
+Computational Constraints:
+•	BERTopic’s reliance on Transformer-based embeddings (e.g., all-mpnet-base-v2) was computationally intensive, especially for large datasets.
+•	Polynomial regression for multiple topics and high-order terms further increased computational demands, slowing down the modeling process.
+
+5. Shiny App
+The app just stored the sentiments over time, topics distribution and the specific reviews that have been assigned to existing topics. From the sidebar, you can choose the time range, selected topics and specific texts.
+
+![shiny_1](pictures/shiny_1.jpg)
+![shiny_2](pictures/shiny_2.jpg)
+![shiny_3](pictures/shiny_3.jpg)
+
+
+6.	Policy Implications
+This analysis provides valuable insights for policymakers and businesses:
+Tourism Development: Positive sentiment trends highlight successful attractions, while negative areas signal improvement opportunities.
+Public Service Optimization: Identifying geographic sentiment disparities can guide resource allocation for parks and other amenities.
+Event Impact Assessment: Monitoring sentiment spikes around events helps evaluate their success and public reception.
+
+7.	Conclusion
+ This project showcases a comprehensive framework for analyzing reviews through NLP, sentiment scoring, and geospatial methods. By uncovering themes, temporal patterns, and geographic insights, the findings contribute to improving public services and business strategies in Las Vegas.
